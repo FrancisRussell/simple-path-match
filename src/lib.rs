@@ -16,18 +16,21 @@ pub enum PatternError {
     CompiledRegex(#[from] regex::Error),
 }
 
-fn pattern_to_regex_string(pattern: &str, separator: &str) -> Result<String, PatternError> {
+fn pattern_to_regex_string(
+    pattern: &str,
+    separator: &str,
+) -> Result<(String, usize), PatternError> {
     let platform_separator_literal = regex::escape(separator);
     let path_current_literal = regex::escape(PATH_CURRENT);
     let components = pattern.split(UNIX_SEP);
+    let mut path_depth = 0;
     let mut regex_str = String::from("^");
     let mut is_trailing_dir = false;
-    let mut first_component = true;
     for (idx, component) in components.enumerate() {
         is_trailing_dir = false;
         if component.is_empty() {
             if idx == 0 {
-                first_component = false;
+                path_depth += 1;
             } else {
                 is_trailing_dir = true;
             }
@@ -38,11 +41,10 @@ fn pattern_to_regex_string(pattern: &str, separator: &str) -> Result<String, Pat
             return Err(PatternError::NoParents);
         }
 
-        if first_component {
-            first_component = false;
-        } else {
+        if path_depth > 0 {
             regex_str += &platform_separator_literal;
         }
+        path_depth += 1;
 
         for character in component.chars() {
             if character == WILDCARD_ANY {
@@ -54,7 +56,7 @@ fn pattern_to_regex_string(pattern: &str, separator: &str) -> Result<String, Pat
             }
         }
     }
-    if first_component {
+    if path_depth == 0 {
         regex_str += &path_current_literal;
     }
     regex_str += &platform_separator_literal;
@@ -63,25 +65,30 @@ fn pattern_to_regex_string(pattern: &str, separator: &str) -> Result<String, Pat
     }
     regex_str += "$";
     println!("REGEX: {}", regex_str);
-    Ok(regex_str)
+    Ok((regex_str, path_depth))
 }
 
-fn pattern_to_regex(pattern: &str, separator: &str) -> Result<Regex, PatternError> {
-    let regex_string = pattern_to_regex_string(pattern, separator)?;
+fn pattern_to_regex(pattern: &str, separator: &str) -> Result<(Regex, usize), PatternError> {
+    let (regex_string, max_depth) = pattern_to_regex_string(pattern, separator)?;
     let regex = Regex::new(regex_string.as_str())?;
-    Ok(regex)
+    Ok((regex, max_depth))
 }
 
 #[derive(Debug)]
 pub struct PathMatch {
     regex: Regex,
+    max_depth: usize,
 }
 
 impl PathMatch {
     pub fn from_pattern(pattern: &str, separator: &str) -> Result<PathMatch, PatternError> {
-        let regex = pattern_to_regex(pattern, separator)?;
-        let result = PathMatch { regex };
+        let (regex, max_depth) = pattern_to_regex(pattern, separator)?;
+        let result = PathMatch { regex, max_depth };
         Ok(result)
+    }
+
+    pub fn max_depth(&self) -> usize {
+        self.max_depth
     }
 }
 
@@ -96,6 +103,7 @@ impl PathMatch {
 pub struct PathMatchBuilder {
     regex_strings: Vec<String>,
     separator: String,
+    max_depth: usize,
 }
 
 impl PathMatchBuilder {
@@ -103,12 +111,14 @@ impl PathMatchBuilder {
         PathMatchBuilder {
             regex_strings: Vec::new(),
             separator: separator.into(),
+            max_depth: 0,
         }
     }
 
     pub fn add_pattern(&mut self, pattern: &str) -> Result<(), PatternError> {
-        let regex_string = pattern_to_regex_string(pattern, self.separator.as_str())?;
+        let (regex_string, max_depth) = pattern_to_regex_string(pattern, self.separator.as_str())?;
         self.regex_strings.push(regex_string);
+        self.max_depth = std::cmp::max(self.max_depth, max_depth);
         Ok(())
     }
 
@@ -116,7 +126,10 @@ impl PathMatchBuilder {
         use itertools::Itertools;
         let combined = self.regex_strings.iter().join("|");
         let regex = Regex::new(combined.as_str())?;
-        let result = PathMatch { regex };
+        let result = PathMatch {
+            regex,
+            max_depth: self.max_depth,
+        };
         Ok(result)
     }
 }
@@ -172,6 +185,24 @@ mod test {
         for pattern in ["hello", "./hello", "././hello"] {
             let pattern = PathMatch::from_pattern(pattern, "/")?;
             assert!(pattern.matches("hello"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn max_depth() -> Result<(), PatternError> {
+        for (pattern, depth) in [
+            (".", 0),
+            ("./", 0),
+            ("./*", 1),
+            ("./*/", 1),
+            ("./././", 0),
+            ("*/*/*/", 3),
+            ("./hello/", 1),
+            ("./*/*", 2),
+        ] {
+            let pattern = PathMatch::from_pattern(pattern, "/")?;
+            assert_eq!(pattern.max_depth(), depth);
         }
         Ok(())
     }
