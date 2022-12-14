@@ -2,6 +2,10 @@
 name = "simple-path-match"
 version = "0.1.0"
 edition = "2021"
+authors = ["Francis Russell <francis@unchartedbackwaters.co.uk>"]
+readme = "README.md"
+license = "BSD-3-Clause"
+description = "Trivial path matching"
 
 [dependencies]
 itertools = "0.10.5"
