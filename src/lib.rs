@@ -126,11 +126,53 @@ mod test {
     use super::*;
 
     #[test]
-    fn basic_pattern() -> Result<(), PatternError> {
+    fn basic_syntax() -> Result<(), PatternError> {
         let path = r"foo\bar\hmm\hello\";
-        println!("{}", path);
-        let pattern = PathMatch::from_pattern(".////foo/*/*/hel?o", r"\")?;
+        let pattern = PathMatch::from_pattern(".////foo/*/*/hel?o/", r"\")?;
         assert!(pattern.matches(path));
+        Ok(())
+    }
+
+    #[test]
+    fn root() -> Result<(), PatternError> {
+        for pattern in ["/", "/./", "/.", "/////", "///./."] {
+            let pattern = PathMatch::from_pattern(pattern, "/")?;
+            assert!(pattern.matches("/"));
+            assert!(!pattern.matches("./"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cwd() -> Result<(), PatternError> {
+        // Dot is not necessarily a folder
+        for pattern in [".", "././././.", ".////."] {
+            let pattern = PathMatch::from_pattern(pattern, "/")?;
+            assert!(pattern.matches("."));
+            assert!(pattern.matches("./"));
+            assert!(!pattern.matches("/"));
+            assert!(!pattern.matches("/."));
+            assert!(!pattern.matches("/./"));
+        }
+
+        // Dot is a folder
+        for pattern in ["./", "./././"] {
+            let pattern = PathMatch::from_pattern(pattern, "/")?;
+            assert!(pattern.matches("./"));
+            assert!(!pattern.matches("."));
+            assert!(!pattern.matches("/"));
+            assert!(!pattern.matches("/."));
+            assert!(!pattern.matches("/./"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn file_path() -> Result<(), PatternError> {
+        for pattern in ["hello", "./hello", "././hello"] {
+            let pattern = PathMatch::from_pattern(pattern, "/")?;
+            assert!(pattern.matches("hello"));
+        }
         Ok(())
     }
 }
