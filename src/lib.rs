@@ -83,8 +83,6 @@ fn pattern_to_regex_string(
     let prefix_str = std::iter::once(&regex_str)
         .chain(prefix_regex_strs.iter())
         .join("|");
-    println!("REGEX: {}", regex_str);
-    println!("PREFIX: {}", prefix_str);
     Ok(ProcessedPattern {
         pattern: regex_str,
         prefix_pattern: prefix_str,
