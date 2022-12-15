@@ -31,6 +31,7 @@ fn pattern_to_regex_string(
 ) -> Result<ProcessedPattern<String>, PatternError> {
     use itertools::Itertools as _;
 
+    assert_ne!(separator.len(), 0, "Separator cannot be empty string");
     let platform_separator_literal = regex::escape(separator);
     let path_current_literal = regex::escape(PATH_CURRENT);
     let components = pattern.split(UNIX_SEP);
