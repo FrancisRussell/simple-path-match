@@ -16,15 +16,25 @@ pub enum PatternError {
     CompiledRegex(#[from] regex::Error),
 }
 
+#[derive(Debug)]
+struct ProcessedPattern<T> {
+    pattern: T,
+    prefix_pattern: T,
+    max_depth: usize,
+}
+
 fn pattern_to_regex_string(
     pattern: &str,
     separator: &str,
-) -> Result<(String, usize), PatternError> {
+) -> Result<ProcessedPattern<String>, PatternError> {
+    use itertools::Itertools as _;
+
     let platform_separator_literal = regex::escape(separator);
     let path_current_literal = regex::escape(PATH_CURRENT);
     let components = pattern.split(UNIX_SEP);
     let mut path_depth = 0;
     let mut regex_str = String::from("^");
+    let mut prefix_regex_strs = Vec::new();
     let mut is_trailing_dir = false;
     for (idx, component) in components.enumerate() {
         is_trailing_dir = false;
@@ -43,6 +53,9 @@ fn pattern_to_regex_string(
 
         if path_depth > 0 {
             regex_str += &platform_separator_literal;
+            // For prefixes, we make the trailing separator optional
+            let prefix_str = format!("{}?$", regex_str);
+            prefix_regex_strs.push(prefix_str);
         }
         path_depth += 1;
 
@@ -64,72 +77,101 @@ fn pattern_to_regex_string(
         regex_str += "?";
     }
     regex_str += "$";
+    let prefix_str = std::iter::once(&regex_str)
+        .chain(prefix_regex_strs.iter())
+        .join("|");
     println!("REGEX: {}", regex_str);
-    Ok((regex_str, path_depth))
+    println!("PREFIX: {}", prefix_str);
+    Ok(ProcessedPattern {
+        pattern: regex_str,
+        prefix_pattern: prefix_str,
+        max_depth: path_depth,
+    })
 }
 
-fn pattern_to_regex(pattern: &str, separator: &str) -> Result<(Regex, usize), PatternError> {
-    let (regex_string, max_depth) = pattern_to_regex_string(pattern, separator)?;
-    let regex = Regex::new(regex_string.as_str())?;
-    Ok((regex, max_depth))
+fn pattern_to_regex(
+    pattern: &str,
+    separator: &str,
+) -> Result<ProcessedPattern<Regex>, PatternError> {
+    let processed = pattern_to_regex_string(pattern, separator)?;
+    let pattern_regex = Regex::new(processed.pattern.as_str())?;
+    let prefix_pattern_regex = Regex::new(processed.prefix_pattern.as_str())?;
+    Ok(ProcessedPattern {
+        pattern: pattern_regex,
+        prefix_pattern: prefix_pattern_regex,
+        max_depth: processed.max_depth,
+    })
 }
 
 #[derive(Debug)]
 pub struct PathMatch {
-    regex: Regex,
-    max_depth: usize,
+    inner: ProcessedPattern<Regex>,
 }
 
 impl PathMatch {
     pub fn from_pattern(pattern: &str, separator: &str) -> Result<PathMatch, PatternError> {
-        let (regex, max_depth) = pattern_to_regex(pattern, separator)?;
-        let result = PathMatch { regex, max_depth };
+        let inner = pattern_to_regex(pattern, separator)?;
+        let result = PathMatch { inner };
         Ok(result)
     }
 
     pub fn max_depth(&self) -> usize {
-        self.max_depth
+        self.inner.max_depth
     }
 }
 
 impl PathMatch {
     pub fn matches<P: AsRef<str>>(&self, path: P) -> bool {
         let path = path.as_ref();
-        self.regex.is_match(&path)
+        self.inner.pattern.is_match(&path)
+    }
+
+    pub fn matches_prefix<P: AsRef<str>>(&self, path: P) -> bool {
+        let path = path.as_ref();
+        self.inner.prefix_pattern.is_match(&path)
     }
 }
 
 #[derive(Default)]
 pub struct PathMatchBuilder {
-    regex_strings: Vec<String>,
+    processed: Vec<ProcessedPattern<String>>,
     separator: String,
-    max_depth: usize,
 }
 
 impl PathMatchBuilder {
     pub fn new(separator: &str) -> PathMatchBuilder {
         PathMatchBuilder {
-            regex_strings: Vec::new(),
+            processed: Vec::new(),
             separator: separator.into(),
-            max_depth: 0,
         }
     }
 
     pub fn add_pattern(&mut self, pattern: &str) -> Result<(), PatternError> {
-        let (regex_string, max_depth) = pattern_to_regex_string(pattern, self.separator.as_str())?;
-        self.regex_strings.push(regex_string);
-        self.max_depth = std::cmp::max(self.max_depth, max_depth);
+        let processed = pattern_to_regex_string(pattern, self.separator.as_str())?;
+        self.processed.push(processed);
         Ok(())
     }
 
     pub fn build(self) -> Result<PathMatch, PatternError> {
-        use itertools::Itertools;
-        let combined = self.regex_strings.iter().join("|");
-        let regex = Regex::new(combined.as_str())?;
-        let result = PathMatch {
-            regex,
-            max_depth: self.max_depth,
+        use itertools::Itertools as _;
+
+        let combined_pattern = self.processed.iter().map(|p| &p.pattern).join("|");
+        let combined_prefix_pattern = self.processed.iter().map(|p| &p.prefix_pattern).join("|");
+        let max_depth = self
+            .processed
+            .iter()
+            .map(|p| p.max_depth)
+            .max()
+            .unwrap_or(0);
+
+        let combined_pattern = Regex::new(&combined_pattern)?;
+        let combined_prefix_pattern = Regex::new(&combined_prefix_pattern)?;
+        let result = ProcessedPattern {
+            pattern: combined_pattern,
+            prefix_pattern: combined_prefix_pattern,
+            max_depth,
         };
+        let result = PathMatch { inner: result };
         Ok(result)
     }
 }
@@ -185,6 +227,23 @@ mod test {
         for pattern in ["hello", "./hello", "././hello"] {
             let pattern = PathMatch::from_pattern(pattern, "/")?;
             assert!(pattern.matches("hello"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_matching() -> Result<(), PatternError> {
+        let pattern = "hello/there/friend";
+        let pattern = PathMatch::from_pattern(pattern, "/")?;
+        for path in [
+            "hello",
+            "hello/",
+            "hello/there",
+            "hello/there/",
+            "hello/there/friend",
+            "hello/there/friend/",
+        ] {
+            assert!(pattern.matches_prefix(path));
         }
         Ok(())
     }
