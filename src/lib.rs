@@ -61,9 +61,9 @@ fn pattern_to_regex_string(
 
         for character in component.chars() {
             if character == WILDCARD_ANY {
-                regex_str += &format!("[^{}]*", UNIX_SEP);
+                regex_str += &format!("[^{}]*", platform_separator_literal);
             } else if character == WILDCARD_SINGLE {
-                regex_str += &format!("[^{}]", UNIX_SEP);
+                regex_str += &format!("[^{}]", platform_separator_literal);
             } else {
                 regex_str += &regex::escape(&String::from(character));
             }
@@ -182,9 +182,34 @@ mod test {
 
     #[test]
     fn basic_syntax() -> Result<(), PatternError> {
-        let path = r"foo\bar\hmm\hello\";
-        let pattern = PathMatch::from_pattern(".////foo/*/*/hel?o/", r"\")?;
-        assert!(pattern.matches(path));
+        let path = r"foo|bar|hmm|hello|";
+        for separator in ["/", "\\"] {
+            let path = path.replace("|", separator);
+            let pattern = PathMatch::from_pattern(".////foo/*/*/hel?o/", separator)?;
+            assert!(pattern.matches(path));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn star() -> Result<(), PatternError> {
+        let path = r"foo|bar|hmm|hello|";
+        for separator in ["/", "\\"] {
+            let path = &path.replace("|", separator);
+
+            let pattern = PathMatch::from_pattern("./*", separator)?;
+            assert!(!pattern.matches(path));
+
+            let pattern = PathMatch::from_pattern("./*/*", separator)?;
+            assert!(!pattern.matches(path));
+
+            let pattern = PathMatch::from_pattern("./*/*/*", separator)?;
+            assert!(!pattern.matches(path));
+
+            let pattern = PathMatch::from_pattern("./*/*/*/*", separator)?;
+            assert!(pattern.matches(path));
+        }
+
         Ok(())
     }
 
@@ -234,16 +259,19 @@ mod test {
     #[test]
     fn prefix_matching() -> Result<(), PatternError> {
         let pattern = "hello/there/friend";
-        let pattern = PathMatch::from_pattern(pattern, "/")?;
-        for path in [
-            "hello",
-            "hello/",
-            "hello/there",
-            "hello/there/",
-            "hello/there/friend",
-            "hello/there/friend/",
-        ] {
-            assert!(pattern.matches_prefix(path));
+        for separator in ["/", "\\"] {
+            let pattern = PathMatch::from_pattern(pattern, separator)?;
+            for path in [
+                "hello",
+                "hello|",
+                "hello|there",
+                "hello|there|",
+                "hello|there|friend",
+                "hello|there|friend|",
+            ] {
+                let path = path.replace("|", separator);
+                assert!(pattern.matches_prefix(path));
+            }
         }
         Ok(())
     }
