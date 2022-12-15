@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use regex::Regex;
 use thiserror::Error;
 
@@ -123,12 +125,12 @@ impl PathMatch {
 impl PathMatch {
     pub fn matches<P: AsRef<str>>(&self, path: P) -> bool {
         let path = path.as_ref();
-        self.inner.pattern.is_match(&path)
+        self.inner.pattern.is_match(path)
     }
 
     pub fn matches_prefix<P: AsRef<str>>(&self, path: P) -> bool {
         let path = path.as_ref();
-        self.inner.prefix_pattern.is_match(&path)
+        self.inner.prefix_pattern.is_match(path)
     }
 }
 
