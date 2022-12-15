@@ -135,7 +135,6 @@ impl PathMatch {
     }
 }
 
-#[derive(Default)]
 pub struct PathMatchBuilder {
     processed: Vec<ProcessedPattern<String>>,
     separator: String,
