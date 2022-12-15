@@ -18,7 +18,7 @@ pub enum PatternError {
     CompiledRegex(#[from] regex::Error),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ProcessedPattern<T> {
     pattern: T,
     prefix_pattern: T,
@@ -104,7 +104,7 @@ fn pattern_to_regex(
     })
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PathMatch {
     inner: ProcessedPattern<Regex>,
 }
