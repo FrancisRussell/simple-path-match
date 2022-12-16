@@ -54,7 +54,10 @@ fn pattern_to_regex_string(
             return Err(PatternError::NoParents);
         }
 
-        if path_depth > 0 {
+        if path_depth == 0 {
+            let prefix_str = format!("^{}{}?$", path_current_literal, platform_separator_literal);
+            prefix_regex_strs.push(prefix_str);
+        } else {
             regex_str += &platform_separator_literal;
             // For prefixes, we make the trailing separator optional
             let prefix_str = format!("{}?$", regex_str);
@@ -262,6 +265,8 @@ mod test {
         for separator in ["/", "\\"] {
             let pattern = PathMatch::from_pattern(pattern, separator)?;
             for path in [
+                ".",
+                ".|",
                 "hello",
                 "hello|",
                 "hello|there",
