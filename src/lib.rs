@@ -25,6 +25,15 @@ struct ProcessedPattern<T> {
     max_depth: usize,
 }
 
+fn never_match() -> ProcessedPattern<String> {
+    let never_match = r"\z.\A";
+    ProcessedPattern {
+        pattern: never_match.into(),
+        prefix_pattern: never_match.into(),
+        max_depth: 0,
+    }
+}
+
 fn pattern_to_regex_string(
     pattern: &str,
     separator: &str,
@@ -143,8 +152,10 @@ pub struct PathMatchBuilder {
 
 impl PathMatchBuilder {
     pub fn new(separator: &str) -> PathMatchBuilder {
+        // We need a special regex that never matches otherwise if we add no patterns,
+        // our resulting regex will be the empty string, which matches everything
         PathMatchBuilder {
-            processed: Vec::new(),
+            processed: vec![never_match()],
             separator: separator.into(),
         }
     }
@@ -296,6 +307,16 @@ mod test {
             let pattern = PathMatch::from_pattern(pattern, "/")?;
             assert_eq!(pattern.max_depth(), depth);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn no_patterns_match_nothing() -> Result<(), PatternError> {
+        let builder = PathMatchBuilder::new("/");
+        let pattern = builder.build()?;
+        assert!(!pattern.matches("non_empty"));
+        assert!(!pattern.matches(""));
+        assert!(!pattern.matches("/"));
         Ok(())
     }
 }
