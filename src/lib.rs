@@ -350,4 +350,12 @@ mod test {
         assert!(pattern.matches(r"hello"));
         Ok(())
     }
+
+    #[test]
+    fn wildcard_matches_dot_in_middle() -> Result<(), PatternError> {
+        let pattern = PathMatch::from_pattern("hello*there", r"\")?;
+        assert!(pattern.matches(r"hello.there"));
+        Ok(())
+    }
+
 }
