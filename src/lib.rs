@@ -319,4 +319,13 @@ mod test {
         assert!(!pattern.matches("/"));
         Ok(())
     }
+
+    #[test]
+    fn multiple_wildcard() -> Result<(), PatternError> {
+        let pattern = PathMatch::from_pattern("*/*", r"\")?;
+        assert!(!pattern.matches(r"hello"));
+        assert!(pattern.matches(r"hello\there"));
+        assert!(!pattern.matches(r"hello\there\friend"));
+        Ok(())
+    }
 }
