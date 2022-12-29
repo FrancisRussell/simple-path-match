@@ -74,9 +74,21 @@ fn pattern_to_regex_string(
         }
         path_depth += 1;
 
-        for character in component.chars() {
+        for (idx, character) in component.chars().enumerate() {
             if character == WILDCARD_ANY {
-                regex_str += &format!("[^{}]*", platform_separator_literal);
+                if idx == 0 {
+                    // Don't match dot
+                    regex_str += &format!(
+                        "([^{}{}][^{}]*|{}[^{}]+)",
+                        path_current_literal,
+                        platform_separator_literal,
+                        platform_separator_literal,
+                        path_current_literal,
+                        platform_separator_literal,
+                    );
+                } else {
+                    regex_str += &format!("[^{}]*", platform_separator_literal);
+                }
             } else if character == WILDCARD_SINGLE {
                 regex_str += &format!("[^{}]", platform_separator_literal);
             } else {
@@ -323,9 +335,19 @@ mod test {
     #[test]
     fn multiple_wildcard() -> Result<(), PatternError> {
         let pattern = PathMatch::from_pattern("*/*", r"\")?;
+        assert!(!pattern.matches(r"."));
         assert!(!pattern.matches(r"hello"));
         assert!(pattern.matches(r"hello\there"));
         assert!(!pattern.matches(r"hello\there\friend"));
+        Ok(())
+    }
+
+    #[test]
+    fn single_wildcard() -> Result<(), PatternError> {
+        let pattern = PathMatch::from_pattern("*", r"\")?;
+        assert!(!pattern.matches(r"."));
+        assert!(pattern.matches(r".hello"));
+        assert!(pattern.matches(r"hello"));
         Ok(())
     }
 }
