@@ -3,26 +3,25 @@
 This is a utility library for another project. It is factored out into a separate
 repository since this makes it easier to run tests.
 
-Implements the ability to match patterns against paths by compiling the pattern
-to a regular expression:
-- Patterns are limited to glob expression syntax but with only `*` and `?`
-  being supported. 
+Implements the ability to match patterns against paths:
+- Patterns are limited to glob expression syntax but with only `*` being
+  supported.
 - `*` cannot match path separators.
-- Paths can only be UTF-8 strings - neither slices of bytes nor `OsStr` is
+- Multiple `*`s cannot appear in a single component.
+- Paths can only be UTF-8 strings - neither slices of bytes nor `OsStr`s are
   supported. 
 - Paths can be tested to see if they are a prefix of a potentially matching
   path - this enables one to prune traversal of a directory structure when
   searching for matches.
 - There is no direct support for matching against `std::path`.
-- There is no ability to use a pattern to iterate the filesystem - it's an
+- There is no ability to use a pattern to iterate the filesystem - it's a
   matcher against glob patterns, not a glob evaluator.
 - The separator of the paths to be matched against is specified at run-time.
 - No `..` instances may appear in the pattern - the library is only intended
   for evaluating relative paths below a root path.
-- No `..` instances should appear in the paths being matched either, but this
-  is not checked for.
-- The paths being matched must be normalized - no `.` instances may
-  appear in the path if it could be expressed without them.
+- The paths being matched must be normalized - they must use only the specified
+  separator and no `.` instances may appear in the path if it could be
+  expressed without them.
 
 Why would someone want a library with so many restrictions? 
 
