@@ -186,18 +186,12 @@ pub struct PathMatch {
 
 impl std::fmt::Display for PathMatch {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        let mut first_pattern = true;
-        for pattern in &self.patterns {
-            if first_pattern {
-                first_pattern = false;
-            } else {
+        for (pattern_idx, pattern) in self.patterns.iter().enumerate() {
+            if pattern_idx > 0 {
                 UNIX_DELIMITER.fmt(formatter)?;
             }
-            let mut first_component = true;
-            for component in pattern {
-                if first_component {
-                    first_component = false;
-                } else {
+            for (component_idx, component) in pattern.iter().enumerate() {
+                if component_idx > 0 {
                     UNIX_SEP.fmt(formatter)?;
                 }
                 component.fmt(formatter)?;
