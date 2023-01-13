@@ -1,4 +1,5 @@
-#![allow(clippy::uninlined_format_args)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::uninlined_format_args, clippy::missing_errors_doc)]
 
 use std::collections::VecDeque;
 use thiserror::Error;
@@ -93,9 +94,8 @@ impl<'a> Iterator for StringComponentIter<'a> {
                 "" => {
                     if idx == 0 {
                         return Some(PathComponent::RootName(component.to_string()));
-                    } else {
-                        self.is_dir = true;
                     }
+                    self.is_dir = true;
                 }
                 PATH_CURRENT => return Some(PathComponent::Current),
                 PATH_PARENT => return Some(PathComponent::Parent),
@@ -167,7 +167,7 @@ fn path_to_pattern<I: IntoIterator<Item = PathComponent>>(
                 if result.is_empty() {
                     result.push(PatternComponent::Literal(PathComponent::Current));
                 }
-                result.push(PatternComponent::Literal(component))
+                result.push(PatternComponent::Literal(component));
             }
             PathComponent::RootName(_) => result.push(PatternComponent::Literal(component)),
         }
@@ -276,6 +276,7 @@ impl PathMatch {
         true
     }
 
+    #[must_use]
     pub fn max_depth(&self) -> usize {
         self.patterns
             .iter()
@@ -305,6 +306,7 @@ pub struct PathMatchBuilder {
 }
 
 impl PathMatchBuilder {
+    #[must_use]
     pub fn new(separator: &str) -> PathMatchBuilder {
         PathMatchBuilder {
             processed: Vec::new(),
