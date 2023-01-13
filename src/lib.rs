@@ -1,8 +1,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::uninlined_format_args, clippy::missing_errors_doc)]
 
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
 
 const PATH_CURRENT: &str = ".";
@@ -15,17 +14,8 @@ enum PathComponent {
     Current,
     DirectoryMarker,
     Name(String),
-    RootName(String),
     Parent,
-}
-
-impl PathComponent {
-    fn traversal_depth(&self) -> usize {
-        match self {
-            PathComponent::Current | PathComponent::DirectoryMarker => 0,
-            PathComponent::Name(_) | PathComponent::RootName(_) | PathComponent::Parent => 1,
-        }
-    }
+    RootName(String),
 }
 
 impl std::fmt::Display for PathComponent {
@@ -39,14 +29,17 @@ impl std::fmt::Display for PathComponent {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct StartsEndsWith(String, String);
-
-impl StartsEndsWith {
-    pub fn matches(&self, name: &str) -> bool {
-        name.starts_with(&self.0) && name.ends_with(&self.1)
+impl PathComponent {
+    fn traversal_depth(&self) -> usize {
+        match self {
+            PathComponent::Current | PathComponent::DirectoryMarker => 0,
+            PathComponent::Name(_) | PathComponent::RootName(_) | PathComponent::Parent => 1,
+        }
     }
 }
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct StartsEndsWith(String, String);
 
 impl std::fmt::Display for StartsEndsWith {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
@@ -56,7 +49,13 @@ impl std::fmt::Display for StartsEndsWith {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl StartsEndsWith {
+    pub fn matches(&self, name: &str) -> bool {
+        name.starts_with(&self.0) && name.ends_with(&self.1)
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum PatternComponent {
     Literal(PathComponent),
     StartsEndsWith(StartsEndsWith),
@@ -270,15 +269,13 @@ impl PathMatchNode {
         let max = &mut self.max_traversals;
         *min = if self.can_end { 0 } else { usize::MAX };
         *max = 0;
-        for (component, node) in &mut self.literals {
+        let node_iter = self
+            .literals
+            .iter_mut()
+            .map(|(k, v)| (k.traversal_depth(), v))
+            .chain(self.starts_ends_with.values_mut().map(|v| (1, v)));
+        for (component_depth, node) in node_iter {
             let (node_min, node_max) = node.recompute_depth_bounds();
-            let component_depth = component.traversal_depth();
-            *min = std::cmp::min(*min, node_min + component_depth);
-            *max = std::cmp::max(*max, node_max + component_depth);
-        }
-        for node in self.starts_ends_with.values_mut() {
-            let (node_min, node_max) = node.recompute_depth_bounds();
-            let component_depth = 1;
             *min = std::cmp::min(*min, node_min + component_depth);
             *max = std::cmp::max(*max, node_max + component_depth);
         }
@@ -400,8 +397,8 @@ impl PathMatchBuilder {
 
     pub fn build(self) -> Result<PathMatch, PatternError> {
         let mut match_tree = PathMatchNode::default();
-        for pattern in &self.processed {
-            match_tree.insert(pattern.clone());
+        for pattern in self.processed {
+            match_tree.insert(pattern);
         }
         match_tree.recompute_depth_bounds();
         let result = PathMatch {
