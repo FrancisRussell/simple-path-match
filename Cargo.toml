@@ -8,5 +8,4 @@ license = "BSD-3-Clause"
 description = "Trivial path matching"
 
 [dependencies]
-itertools = "0.10.5"
 thiserror = "1.0.37"
