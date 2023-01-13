@@ -9,5 +9,4 @@ description = "Trivial path matching"
 
 [dependencies]
 itertools = "0.10.5"
-regex = { version = "1.7.0", default-features = false, features = [ "std" ] }
 thiserror = "1.0.37"
