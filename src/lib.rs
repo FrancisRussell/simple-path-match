@@ -1,6 +1,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::uninlined_format_args, clippy::missing_errors_doc)]
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
 
@@ -10,15 +11,15 @@ const UNIX_SEP: &str = "/";
 const WILDCARD_ANY: &str = "*";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-enum PathComponent {
+enum PathComponent<'a> {
     Current,
     DirectoryMarker,
-    Name(String),
+    Name(Cow<'a, str>),
     Parent,
-    RootName(String),
+    RootName(Cow<'a, str>),
 }
 
-impl std::fmt::Display for PathComponent {
+impl std::fmt::Display for PathComponent<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             PathComponent::Current => formatter.write_str(PATH_CURRENT),
@@ -29,11 +30,21 @@ impl std::fmt::Display for PathComponent {
     }
 }
 
-impl PathComponent {
+impl PathComponent<'_> {
     fn traversal_depth(&self) -> usize {
         match self {
             PathComponent::Current | PathComponent::DirectoryMarker => 0,
             PathComponent::Name(_) | PathComponent::RootName(_) | PathComponent::Parent => 1,
+        }
+    }
+
+    fn into_owned(self) -> PathComponent<'static> {
+        match self {
+            PathComponent::Current => PathComponent::Current,
+            PathComponent::Parent => PathComponent::Parent,
+            PathComponent::DirectoryMarker => PathComponent::DirectoryMarker,
+            PathComponent::Name(n) => PathComponent::Name(n.into_owned().into()),
+            PathComponent::RootName(n) => PathComponent::RootName(n.into_owned().into()),
         }
     }
 }
@@ -57,7 +68,7 @@ impl StartsEndsWith {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum PatternComponent {
-    Literal(PathComponent),
+    Literal(PathComponent<'static>),
     StartsEndsWith(StartsEndsWith),
 }
 
@@ -94,21 +105,21 @@ impl<'a> StringComponentIter<'a> {
 }
 
 impl<'a> Iterator for StringComponentIter<'a> {
-    type Item = PathComponent;
+    type Item = PathComponent<'a>;
 
-    fn next(&mut self) -> Option<PathComponent> {
+    fn next(&mut self) -> Option<PathComponent<'a>> {
         for (idx, component) in self.path_string.by_ref() {
             self.is_dir = false;
             match component {
                 "" => {
                     if idx == 0 {
-                        return Some(PathComponent::RootName(component.to_string()));
+                        return Some(PathComponent::RootName(component.into()));
                     }
                     self.is_dir = true;
                 }
                 PATH_CURRENT => return Some(PathComponent::Current),
                 PATH_PARENT => return Some(PathComponent::Parent),
-                _ => return Some(PathComponent::Name(component.to_string())),
+                _ => return Some(PathComponent::Name(component.into())),
             }
         }
         if self.is_dir {
@@ -120,7 +131,9 @@ impl<'a> Iterator for StringComponentIter<'a> {
     }
 }
 
-fn normalized<I: IntoIterator<Item = PathComponent>>(components: I) -> Vec<PathComponent> {
+fn normalized<'a, I: IntoIterator<Item = PathComponent<'a>>>(
+    components: I,
+) -> Vec<PathComponent<'a>> {
     let components = components.into_iter();
     let mut result = Vec::with_capacity(components.size_hint().0);
     for component in components {
@@ -150,26 +163,26 @@ fn normalized<I: IntoIterator<Item = PathComponent>>(components: I) -> Vec<PathC
     result
 }
 
-fn path_to_pattern<I: IntoIterator<Item = PathComponent>>(
+fn path_to_pattern<'a, I: IntoIterator<Item = PathComponent<'a>>>(
     components: I,
 ) -> Result<Vec<PatternComponent>, PatternError> {
     let components = components.into_iter();
     let mut result = Vec::with_capacity(components.size_hint().0);
     for component in components {
         match component {
-            PathComponent::Name(component) => {
-                let matcher = if let Some(idx) = component.find(WILDCARD_ANY) {
-                    let (start, end) = component.split_at(idx);
+            PathComponent::Name(ref name) => {
+                let matcher = if let Some(idx) = name.find(WILDCARD_ANY) {
+                    let (start, end) = name.split_at(idx);
                     let (_, end) = end.split_at(WILDCARD_ANY.len());
                     if start.contains(WILDCARD_ANY) || end.contains(WILDCARD_ANY) {
-                        return Err(PatternError::WildcardPosition(component));
+                        return Err(PatternError::WildcardPosition(name.to_string()));
                     }
                     PatternComponent::StartsEndsWith(StartsEndsWith(
                         start.to_string(),
                         end.to_string(),
                     ))
                 } else {
-                    PatternComponent::Literal(PathComponent::Name(component))
+                    PatternComponent::Literal(component.into_owned())
                 };
                 result.push(matcher);
             }
@@ -179,9 +192,11 @@ fn path_to_pattern<I: IntoIterator<Item = PathComponent>>(
                 if result.is_empty() {
                     result.push(PatternComponent::Literal(PathComponent::Current));
                 }
-                result.push(PatternComponent::Literal(component));
+                result.push(PatternComponent::Literal(component.into_owned()));
             }
-            PathComponent::RootName(_) => result.push(PatternComponent::Literal(component)),
+            PathComponent::RootName(_) => {
+                result.push(PatternComponent::Literal(component.into_owned()));
+            }
         }
     }
     if result.is_empty() {
@@ -193,7 +208,7 @@ fn path_to_pattern<I: IntoIterator<Item = PathComponent>>(
 #[derive(Clone, Debug)]
 struct PathMatchNode {
     can_end: bool,
-    literals: HashMap<PathComponent, PathMatchNode>,
+    literals: HashMap<PathComponent<'static>, PathMatchNode>,
     starts_ends_with: HashMap<StartsEndsWith, PathMatchNode>,
     min_traversals: usize,
     max_traversals: usize,
