@@ -551,6 +551,66 @@ mod test {
     }
 
     #[test]
+    fn multiple_builder_patterns() -> Result<(), PatternError> {
+        let mut builder = PathMatchBuilder::new("/");
+        for pattern in [
+            "./a",
+            "./b/",
+            "a/b/c/d/e",
+            "./b/foo*",
+            "./b/bar",
+            "./b/test*pattern",
+            "./b/test*pattern/final",
+            "./c",
+            "./c/",
+        ] {
+            builder.add_pattern(pattern)?;
+        }
+        let pattern = builder.build()?;
+
+        // These should match
+        for path in [
+            "a",
+            "a/",
+            "b/",
+            "a/b/c/d/e",
+            "b/foobar",
+            "b/foocar",
+            "b/bar",
+            "b/test_wildcard_pattern",
+            "b/test_wildcard_pattern/final",
+            "c",
+            "c/",
+        ] {
+            assert!(pattern.matches(path));
+        }
+
+        // These should not
+        for path in [
+            "b",
+            "a/b/c/d",
+            "b/folbar",
+            "b/barfoo",
+            "b/tes_attern",
+        ] {
+            assert!(!pattern.matches(path));
+        }
+
+        // These should prefix-match
+        for path in [
+            "b",
+            "a/b/c",
+            "a/b/c/",
+            "b/test_wildcard_pattern",
+            "b/test_wildcard_pattern/",
+        ] {
+            assert!(pattern.matches_prefix(path));
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn no_patterns_match_nothing() -> Result<(), PatternError> {
         let builder = PathMatchBuilder::new("/");
         let pattern = builder.build()?;
