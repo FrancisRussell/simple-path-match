@@ -1,203 +1,425 @@
-#![allow(clippy::uninlined_format_args)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::uninlined_format_args, clippy::missing_errors_doc)]
 
-use regex::Regex;
+use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
 
 const PATH_CURRENT: &str = ".";
 const PATH_PARENT: &str = "..";
-const WILDCARD_ANY: char = '*';
-const WILDCARD_SINGLE: char = '?';
 const UNIX_SEP: &str = "/";
+const WILDCARD_ANY: &str = "*";
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum PathComponent<'a> {
+    Current,
+    DirectoryMarker,
+    Name(Cow<'a, str>),
+    Parent,
+    RootName(Cow<'a, str>),
+}
+
+impl std::fmt::Display for PathComponent<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            PathComponent::Current => formatter.write_str(PATH_CURRENT),
+            PathComponent::DirectoryMarker => Ok(()),
+            PathComponent::Name(s) | PathComponent::RootName(s) => formatter.write_str(s),
+            PathComponent::Parent => formatter.write_str(PATH_PARENT),
+        }
+    }
+}
+
+impl PathComponent<'_> {
+    fn traversal_depth(&self) -> usize {
+        match self {
+            PathComponent::Current | PathComponent::DirectoryMarker => 0,
+            PathComponent::Name(_) | PathComponent::RootName(_) | PathComponent::Parent => 1,
+        }
+    }
+
+    fn into_owned(self) -> PathComponent<'static> {
+        match self {
+            PathComponent::Current => PathComponent::Current,
+            PathComponent::Parent => PathComponent::Parent,
+            PathComponent::DirectoryMarker => PathComponent::DirectoryMarker,
+            PathComponent::Name(n) => PathComponent::Name(n.into_owned().into()),
+            PathComponent::RootName(n) => PathComponent::RootName(n.into_owned().into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct StartsEndsWith(String, String);
+
+impl std::fmt::Display for StartsEndsWith {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        formatter.write_str(&self.0)?;
+        formatter.write_str(WILDCARD_ANY)?;
+        formatter.write_str(&self.1)
+    }
+}
+
+impl StartsEndsWith {
+    pub fn matches(&self, name: &str) -> bool {
+        name.starts_with(&self.0) && name.ends_with(&self.1)
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum PatternComponent {
+    Literal(PathComponent<'static>),
+    StartsEndsWith(StartsEndsWith),
+}
+
+impl std::fmt::Display for PatternComponent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            PatternComponent::Literal(c) => c.fmt(formatter),
+            PatternComponent::StartsEndsWith(m) => m.fmt(formatter),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum PatternError {
     #[error("Pattern must not contain parent traversals")]
     NoParents,
 
-    #[error("Pattern compiled to an invalid regex: {0}")]
-    CompiledRegex(#[from] regex::Error),
+    #[error("Only one wilcard allowed in component: `{0}`")]
+    WildcardPosition(String),
+}
+
+struct StringComponentIter<'a> {
+    path_string: std::iter::Enumerate<std::str::Split<'a, &'a str>>,
+    is_dir: bool,
+}
+
+impl<'a> StringComponentIter<'a> {
+    pub fn new(path: &'a str, separator: &'a str) -> StringComponentIter<'a> {
+        StringComponentIter {
+            path_string: path.split(separator).enumerate(),
+            is_dir: false,
+        }
+    }
+}
+
+impl<'a> Iterator for StringComponentIter<'a> {
+    type Item = PathComponent<'a>;
+
+    fn next(&mut self) -> Option<PathComponent<'a>> {
+        for (idx, component) in self.path_string.by_ref() {
+            self.is_dir = false;
+            match component {
+                "" => {
+                    if idx == 0 {
+                        return Some(PathComponent::RootName(component.into()));
+                    }
+                    self.is_dir = true;
+                }
+                PATH_CURRENT => return Some(PathComponent::Current),
+                PATH_PARENT => return Some(PathComponent::Parent),
+                _ => return Some(PathComponent::Name(component.into())),
+            }
+        }
+        if self.is_dir {
+            self.is_dir = false;
+            Some(PathComponent::DirectoryMarker)
+        } else {
+            None
+        }
+    }
+}
+
+fn normalized<'a, I: IntoIterator<Item = PathComponent<'a>>>(
+    components: I,
+) -> Vec<PathComponent<'a>> {
+    let components = components.into_iter();
+    let mut result = Vec::with_capacity(components.size_hint().0);
+    for component in components {
+        match component {
+            PathComponent::Name(_) | PathComponent::RootName(_) => result.push(component),
+            PathComponent::DirectoryMarker => {
+                if result.is_empty() {
+                    result.push(PathComponent::Current);
+                }
+                result.push(PathComponent::DirectoryMarker);
+            }
+            PathComponent::Parent => match result.last() {
+                None | Some(PathComponent::Parent) => result.push(PathComponent::Parent),
+                Some(PathComponent::Name(_)) => drop(result.pop()),
+                Some(PathComponent::RootName(_)) => {}
+                Some(c) => panic!(
+                    "Component found in unexpected place during normalization: {:?}",
+                    c
+                ),
+            },
+            PathComponent::Current => {}
+        }
+    }
+    if result.is_empty() {
+        result.push(PathComponent::Current);
+    }
+    result
+}
+
+fn path_to_pattern<'a, I: IntoIterator<Item = PathComponent<'a>>>(
+    components: I,
+) -> Result<Vec<PatternComponent>, PatternError> {
+    let components = components.into_iter();
+    let mut result = Vec::with_capacity(components.size_hint().0);
+    for component in components {
+        match component {
+            PathComponent::Name(ref name) => {
+                let matcher = if let Some(idx) = name.find(WILDCARD_ANY) {
+                    let (start, end) = name.split_at(idx);
+                    let (_, end) = end.split_at(WILDCARD_ANY.len());
+                    if start.contains(WILDCARD_ANY) || end.contains(WILDCARD_ANY) {
+                        return Err(PatternError::WildcardPosition(name.to_string()));
+                    }
+                    PatternComponent::StartsEndsWith(StartsEndsWith(
+                        start.to_string(),
+                        end.to_string(),
+                    ))
+                } else {
+                    PatternComponent::Literal(component.into_owned())
+                };
+                result.push(matcher);
+            }
+            PathComponent::Parent => return Err(PatternError::NoParents),
+            PathComponent::Current => {}
+            PathComponent::DirectoryMarker => {
+                if result.is_empty() {
+                    result.push(PatternComponent::Literal(PathComponent::Current));
+                }
+                result.push(PatternComponent::Literal(component.into_owned()));
+            }
+            PathComponent::RootName(_) => {
+                result.push(PatternComponent::Literal(component.into_owned()));
+            }
+        }
+    }
+    if result.is_empty() {
+        result.push(PatternComponent::Literal(PathComponent::Current));
+    }
+    Ok(result)
 }
 
 #[derive(Clone, Debug)]
-struct ProcessedPattern<T> {
-    pattern: T,
-    prefix_pattern: T,
-    max_depth: usize,
+struct PathMatchNode {
+    can_end: bool,
+    literals: HashMap<PathComponent<'static>, PathMatchNode>,
+    starts_ends_with: HashMap<StartsEndsWith, PathMatchNode>,
+    min_traversals: usize,
+    max_traversals: usize,
 }
 
-fn never_match() -> ProcessedPattern<String> {
-    let never_match = r"\z.\A";
-    ProcessedPattern {
-        pattern: never_match.into(),
-        prefix_pattern: never_match.into(),
-        max_depth: 0,
+impl Default for PathMatchNode {
+    fn default() -> PathMatchNode {
+        PathMatchNode {
+            can_end: false,
+            literals: HashMap::new(),
+            starts_ends_with: HashMap::new(),
+            min_traversals: 0,
+            max_traversals: usize::MAX,
+        }
     }
 }
 
-fn pattern_to_regex_string(
-    pattern: &str,
-    separator: &str,
-) -> Result<ProcessedPattern<String>, PatternError> {
-    use itertools::Itertools as _;
+impl std::fmt::Display for PathMatchNode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        use std::fmt::Write as _;
 
-    assert_ne!(separator.len(), 0, "Separator cannot be empty string");
-    let platform_separator_literal = regex::escape(separator);
-    let path_current_literal = regex::escape(PATH_CURRENT);
-    let components = pattern.split(UNIX_SEP);
-    let mut path_depth = 0;
-    let mut regex_str = String::from("^");
-    let mut prefix_regex_strs = Vec::new();
-    let mut is_trailing_dir = false;
-    for (idx, component) in components.enumerate() {
-        is_trailing_dir = false;
-        if component.is_empty() {
-            if idx == 0 {
-                path_depth += 1;
-            } else {
-                is_trailing_dir = true;
+        let literals_iter = self.literals.iter().map(|(k, v)| (k.to_string(), v));
+        let matchers_iter = self
+            .starts_ends_with
+            .iter()
+            .map(|(k, v)| (k.to_string(), v));
+        let subnodes_iter = literals_iter.chain(matchers_iter);
+        let mut output = String::new();
+        let mut has_multiple_options = false;
+        for (idx, (k, v)) in subnodes_iter.enumerate() {
+            if idx > 0 {
+                output += "|";
+                has_multiple_options = true;
             }
-            continue;
-        } else if component == PATH_CURRENT {
-            continue;
-        } else if component == PATH_PARENT {
-            return Err(PatternError::NoParents);
+            output += &k;
+            if v.can_end {
+                output += "$";
+            }
+            if !v.is_empty() {
+                output += UNIX_SEP;
+                write!(&mut output, "{}", v)?;
+            }
         }
-
-        if path_depth == 0 {
-            let prefix_str = format!("^{}{}?$", path_current_literal, platform_separator_literal);
-            prefix_regex_strs.push(prefix_str);
-        } else {
-            regex_str += &platform_separator_literal;
-            // For prefixes, we make the trailing separator optional
-            let prefix_str = format!("{}?$", regex_str);
-            prefix_regex_strs.push(prefix_str);
+        if has_multiple_options {
+            formatter.write_str("(")?;
         }
-        path_depth += 1;
+        formatter.write_str(&output)?;
+        if has_multiple_options {
+            formatter.write_str(")")?;
+        }
+        Ok(())
+    }
+}
 
-        for (idx, character) in component.chars().enumerate() {
-            if character == WILDCARD_ANY {
-                if idx == 0 {
-                    // Don't match dot
-                    regex_str += &format!(
-                        "([^{}{}][^{}]*|{}[^{}]+)",
-                        path_current_literal,
-                        platform_separator_literal,
-                        platform_separator_literal,
-                        path_current_literal,
-                        platform_separator_literal,
-                    );
-                } else {
-                    regex_str += &format!("[^{}]*", platform_separator_literal);
+impl PathMatchNode {
+    fn insert_component(&mut self, component: PatternComponent) -> &mut PathMatchNode {
+        self.min_traversals = 0;
+        self.max_traversals = usize::MAX;
+        match component {
+            PatternComponent::Literal(literal) => self.literals.entry(literal).or_default(),
+            PatternComponent::StartsEndsWith(pattern) => {
+                self.starts_ends_with.entry(pattern).or_default()
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.starts_ends_with.is_empty() && self.literals.is_empty()
+    }
+
+    fn recompute_depth_bounds(&mut self) -> (usize, usize) {
+        let min = &mut self.min_traversals;
+        let max = &mut self.max_traversals;
+        *min = if self.can_end { 0 } else { usize::MAX };
+        *max = 0;
+        let node_iter = self
+            .literals
+            .iter_mut()
+            .map(|(k, v)| (k.traversal_depth(), v))
+            .chain(self.starts_ends_with.values_mut().map(|v| (1, v)));
+        for (component_depth, node) in node_iter {
+            let (node_min, node_max) = node.recompute_depth_bounds();
+            *min = std::cmp::min(*min, node_min + component_depth);
+            *max = std::cmp::max(*max, node_max + component_depth);
+        }
+        (*min, *max)
+    }
+
+    pub fn insert(&mut self, mut pattern: Vec<PatternComponent>) {
+        let mut node = self;
+        for head in pattern.drain(..) {
+            node = node.insert_component(head);
+        }
+        node.can_end = true;
+    }
+
+    pub fn matches(node: &PathMatchNode, path: &[PathComponent], match_prefix: bool) -> bool {
+        let mut candidates = VecDeque::new();
+        candidates.push_front((node, path));
+        while let Some((node, path)) = candidates.pop_back() {
+            let path = if match_prefix && path.first() == Some(&PathComponent::Current) {
+                // It is invalid to do this in the non-prefix case, since we might need
+                // to match ".". We need to do this for the prefix case since "." is a prefix
+                // of any relative path, but won't match other paths.
+                &path[1..]
+            } else {
+                path
+            };
+            let can_match = node.can_end || match_prefix;
+            let path_is_dir_marker =
+                path.len() == 1 && path.last() == Some(&PathComponent::DirectoryMarker);
+            if path_is_dir_marker && can_match {
+                return true;
+            }
+            if let Some(component) = path.first() {
+                if let Some(matching_node) = node.literals.get(component) {
+                    candidates.push_front((matching_node, &path[1..]));
                 }
-            } else if character == WILDCARD_SINGLE {
-                regex_str += &format!("[^{}]", platform_separator_literal);
-            } else {
-                regex_str += &regex::escape(&String::from(character));
+                for (name_matcher, matching_node) in &node.starts_ends_with {
+                    if let PathComponent::Name(name) = component {
+                        if name_matcher.matches(name) {
+                            candidates.push_front((matching_node, &path[1..]));
+                        }
+                    }
+                }
+            } else if can_match {
+                return true;
             }
         }
+        false
     }
-    if path_depth == 0 {
-        regex_str += &path_current_literal;
-    }
-    regex_str += &platform_separator_literal;
-    if !is_trailing_dir {
-        regex_str += "?";
-    }
-    regex_str += "$";
-    let prefix_str = std::iter::once(&regex_str)
-        .chain(prefix_regex_strs.iter())
-        .join("|");
-    Ok(ProcessedPattern {
-        pattern: regex_str,
-        prefix_pattern: prefix_str,
-        max_depth: path_depth,
-    })
-}
-
-fn pattern_to_regex(
-    pattern: &str,
-    separator: &str,
-) -> Result<ProcessedPattern<Regex>, PatternError> {
-    let processed = pattern_to_regex_string(pattern, separator)?;
-    let pattern_regex = Regex::new(processed.pattern.as_str())?;
-    let prefix_pattern_regex = Regex::new(processed.prefix_pattern.as_str())?;
-    Ok(ProcessedPattern {
-        pattern: pattern_regex,
-        prefix_pattern: prefix_pattern_regex,
-        max_depth: processed.max_depth,
-    })
 }
 
 #[derive(Clone, Debug)]
 pub struct PathMatch {
-    inner: ProcessedPattern<Regex>,
+    separator: String,
+    match_tree: PathMatchNode,
+}
+
+impl std::fmt::Display for PathMatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        self.match_tree.fmt(formatter)
+    }
 }
 
 impl PathMatch {
     pub fn from_pattern(pattern: &str, separator: &str) -> Result<PathMatch, PatternError> {
-        let inner = pattern_to_regex(pattern, separator)?;
-        let result = PathMatch { inner };
+        let components = StringComponentIter::new(pattern, UNIX_SEP);
+        let pattern = path_to_pattern(components)?;
+        let mut match_tree = PathMatchNode::default();
+        match_tree.insert(pattern);
+        match_tree.recompute_depth_bounds();
+        let result = PathMatch {
+            separator: separator.to_string(),
+            match_tree,
+        };
         Ok(result)
     }
 
-    pub fn max_depth(&self) -> usize {
-        self.inner.max_depth
-    }
-}
-
-impl PathMatch {
     pub fn matches<P: AsRef<str>>(&self, path: P) -> bool {
         let path = path.as_ref();
-        self.inner.pattern.is_match(path)
+        self.matches_common(path, false)
     }
 
     pub fn matches_prefix<P: AsRef<str>>(&self, path: P) -> bool {
         let path = path.as_ref();
-        self.inner.prefix_pattern.is_match(path)
+        self.matches_common(path, true)
+    }
+
+    fn matches_common(&self, path: &str, match_prefix: bool) -> bool {
+        let components = normalized(StringComponentIter::new(path, &self.separator));
+        PathMatchNode::matches(&self.match_tree, &components, match_prefix)
+    }
+
+    #[must_use]
+    pub fn max_depth(&self) -> usize {
+        self.match_tree.max_traversals
     }
 }
 
 pub struct PathMatchBuilder {
-    processed: Vec<ProcessedPattern<String>>,
+    processed: Vec<Vec<PatternComponent>>,
     separator: String,
 }
 
 impl PathMatchBuilder {
+    #[must_use]
     pub fn new(separator: &str) -> PathMatchBuilder {
-        // We need a special regex that never matches otherwise if we add no patterns,
-        // our resulting regex will be the empty string, which matches everything
         PathMatchBuilder {
-            processed: vec![never_match()],
+            processed: Vec::new(),
             separator: separator.into(),
         }
     }
 
     pub fn add_pattern(&mut self, pattern: &str) -> Result<(), PatternError> {
-        let processed = pattern_to_regex_string(pattern, self.separator.as_str())?;
+        let components = StringComponentIter::new(pattern, UNIX_SEP);
+        let processed = path_to_pattern(components)?;
         self.processed.push(processed);
         Ok(())
     }
 
     pub fn build(self) -> Result<PathMatch, PatternError> {
-        use itertools::Itertools as _;
-
-        let combined_pattern = self.processed.iter().map(|p| &p.pattern).join("|");
-        let combined_prefix_pattern = self.processed.iter().map(|p| &p.prefix_pattern).join("|");
-        let max_depth = self
-            .processed
-            .iter()
-            .map(|p| p.max_depth)
-            .max()
-            .unwrap_or(0);
-
-        let combined_pattern = Regex::new(&combined_pattern)?;
-        let combined_prefix_pattern = Regex::new(&combined_prefix_pattern)?;
-        let result = ProcessedPattern {
-            pattern: combined_pattern,
-            prefix_pattern: combined_prefix_pattern,
-            max_depth,
+        let mut match_tree = PathMatchNode::default();
+        for pattern in self.processed {
+            match_tree.insert(pattern);
+        }
+        match_tree.recompute_depth_bounds();
+        let result = PathMatch {
+            separator: self.separator,
+            match_tree,
         };
-        let result = PathMatch { inner: result };
         Ok(result)
     }
 }
@@ -211,7 +433,7 @@ mod test {
         let path = r"foo|bar|hmm|hello|";
         for separator in ["/", "\\"] {
             let path = path.replace("|", separator);
-            let pattern = PathMatch::from_pattern(".////foo/*/*/hel?o/", separator)?;
+            let pattern = PathMatch::from_pattern(".////foo/*/*/hel*o/", separator)?;
             assert!(pattern.matches(path));
         }
         Ok(())
@@ -316,9 +538,75 @@ mod test {
             ("./hello/", 1),
             ("./*/*", 2),
         ] {
-            let pattern = PathMatch::from_pattern(pattern, "/")?;
-            assert_eq!(pattern.max_depth(), depth);
+            let pattern_1 = PathMatch::from_pattern(pattern, "/")?;
+            let pattern_2 = {
+                let mut builder = PathMatchBuilder::new("/");
+                builder.add_pattern(pattern)?;
+                builder.build()?
+            };
+            assert_eq!(pattern_1.max_depth(), depth);
+            assert_eq!(pattern_2.max_depth(), depth);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_builder_patterns() -> Result<(), PatternError> {
+        let mut builder = PathMatchBuilder::new("/");
+        for pattern in [
+            "./a",
+            "./b/",
+            "a/b/c/d/e",
+            "./b/foo*",
+            "./b/bar",
+            "./b/test*pattern",
+            "./b/test*pattern/final",
+            "./c",
+            "./c/",
+        ] {
+            builder.add_pattern(pattern)?;
+        }
+        let pattern = builder.build()?;
+
+        // These should match
+        for path in [
+            "a",
+            "a/",
+            "b/",
+            "a/b/c/d/e",
+            "b/foobar",
+            "b/foocar",
+            "b/bar",
+            "b/test_wildcard_pattern",
+            "b/test_wildcard_pattern/final",
+            "c",
+            "c/",
+        ] {
+            assert!(pattern.matches(path));
+        }
+
+        // These should not
+        for path in [
+            "b",
+            "a/b/c/d",
+            "b/folbar",
+            "b/barfoo",
+            "b/tes_attern",
+        ] {
+            assert!(!pattern.matches(path));
+        }
+
+        // These should prefix-match
+        for path in [
+            "b",
+            "a/b/c",
+            "a/b/c/",
+            "b/test_wildcard_pattern",
+            "b/test_wildcard_pattern/",
+        ] {
+            assert!(pattern.matches_prefix(path));
+        }
+
         Ok(())
     }
 
@@ -357,5 +645,4 @@ mod test {
         assert!(pattern.matches(r"hello.there"));
         Ok(())
     }
-
 }
