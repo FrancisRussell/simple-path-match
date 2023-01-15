@@ -1,11 +1,16 @@
 [package]
 name = "simple-path-match"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Francis Russell <francis@unchartedbackwaters.co.uk>"]
 readme = "README.md"
 license = "BSD-3-Clause"
 description = "Trivial path matching"
+categories = ["no-std", "filesystem"]
+repository = "https://github.com/FrancisRussell/simple-path-match.git"
+homepage = "https://github.com/FrancisRussell/simple-path-match"
+keywords = ["path", "matching", "no-std"]
 
 [dependencies]
-thiserror = "1.0.37"
+beef = { version = "0.5.2", default-features = false }
+snafu = { version = "0.7.4", default-features = false }
