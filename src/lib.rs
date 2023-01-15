@@ -1,16 +1,21 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::uninlined_format_args, clippy::missing_errors_doc)]
+#![cfg_attr(not(test), no_std)]
 
-use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
-use thiserror::Error;
+extern crate alloc;
+
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::{String, ToString as _};
+use alloc::vec::Vec;
+use beef::Cow;
+use snafu::Snafu;
 
 const PATH_CURRENT: &str = ".";
 const PATH_PARENT: &str = "..";
 const UNIX_SEP: &str = "/";
 const WILDCARD_ANY: &str = "*";
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
 enum PathComponent<'a> {
     Current,
     DirectoryMarker,
@@ -19,8 +24,8 @@ enum PathComponent<'a> {
     RootName(Cow<'a, str>),
 }
 
-impl std::fmt::Display for PathComponent<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+impl alloc::fmt::Display for PathComponent<'_> {
+    fn fmt(&self, formatter: &mut alloc::fmt::Formatter<'_>) -> Result<(), alloc::fmt::Error> {
         match self {
             PathComponent::Current => formatter.write_str(PATH_CURRENT),
             PathComponent::DirectoryMarker => Ok(()),
@@ -49,11 +54,11 @@ impl PathComponent<'_> {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct StartsEndsWith(String, String);
 
-impl std::fmt::Display for StartsEndsWith {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+impl alloc::fmt::Display for StartsEndsWith {
+    fn fmt(&self, formatter: &mut alloc::fmt::Formatter<'_>) -> Result<(), alloc::fmt::Error> {
         formatter.write_str(&self.0)?;
         formatter.write_str(WILDCARD_ANY)?;
         formatter.write_str(&self.1)
@@ -66,14 +71,14 @@ impl StartsEndsWith {
     }
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum PatternComponent {
     Literal(PathComponent<'static>),
     StartsEndsWith(StartsEndsWith),
 }
 
-impl std::fmt::Display for PatternComponent {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+impl alloc::fmt::Display for PatternComponent {
+    fn fmt(&self, formatter: &mut alloc::fmt::Formatter<'_>) -> Result<(), alloc::fmt::Error> {
         match self {
             PatternComponent::Literal(c) => c.fmt(formatter),
             PatternComponent::StartsEndsWith(m) => m.fmt(formatter),
@@ -81,17 +86,20 @@ impl std::fmt::Display for PatternComponent {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum PatternError {
-    #[error("Pattern must not contain parent traversals")]
+/// Errors that can occur during pattern compilation
+#[derive(Debug, Snafu)]
+pub enum Error {
+    /// The supplied pattern contained a parent traversal (`..`)
+    #[snafu(display("Pattern must not contain parent traversals"))]
     NoParents,
 
-    #[error("Only one wilcard allowed in component: `{0}`")]
-    WildcardPosition(String),
+    /// A wilcard was used in a component in an invalid way
+    #[snafu(display("Only one wilcard allowed in component: `{}`", component))]
+    WildcardPosition { component: String },
 }
 
 struct StringComponentIter<'a> {
-    path_string: std::iter::Enumerate<std::str::Split<'a, &'a str>>,
+    path_string: core::iter::Enumerate<core::str::Split<'a, &'a str>>,
     is_dir: bool,
 }
 
@@ -131,9 +139,7 @@ impl<'a> Iterator for StringComponentIter<'a> {
     }
 }
 
-fn normalized<'a, I: IntoIterator<Item = PathComponent<'a>>>(
-    components: I,
-) -> Vec<PathComponent<'a>> {
+fn normalized<'a, I: IntoIterator<Item = PathComponent<'a>>>(components: I) -> Vec<PathComponent<'a>> {
     let components = components.into_iter();
     let mut result = Vec::with_capacity(components.size_hint().0);
     for component in components {
@@ -149,10 +155,7 @@ fn normalized<'a, I: IntoIterator<Item = PathComponent<'a>>>(
                 None | Some(PathComponent::Parent) => result.push(PathComponent::Parent),
                 Some(PathComponent::Name(_)) => drop(result.pop()),
                 Some(PathComponent::RootName(_)) => {}
-                Some(c) => panic!(
-                    "Component found in unexpected place during normalization: {:?}",
-                    c
-                ),
+                Some(c) => panic!("Component found in unexpected place during normalization: {:?}", c),
             },
             PathComponent::Current => {}
         }
@@ -165,7 +168,7 @@ fn normalized<'a, I: IntoIterator<Item = PathComponent<'a>>>(
 
 fn path_to_pattern<'a, I: IntoIterator<Item = PathComponent<'a>>>(
     components: I,
-) -> Result<Vec<PatternComponent>, PatternError> {
+) -> Result<Vec<PatternComponent>, Error> {
     let components = components.into_iter();
     let mut result = Vec::with_capacity(components.size_hint().0);
     for component in components {
@@ -175,18 +178,17 @@ fn path_to_pattern<'a, I: IntoIterator<Item = PathComponent<'a>>>(
                     let (start, end) = name.split_at(idx);
                     let (_, end) = end.split_at(WILDCARD_ANY.len());
                     if start.contains(WILDCARD_ANY) || end.contains(WILDCARD_ANY) {
-                        return Err(PatternError::WildcardPosition(name.to_string()));
+                        return Err(Error::WildcardPosition {
+                            component: name.to_string(),
+                        });
                     }
-                    PatternComponent::StartsEndsWith(StartsEndsWith(
-                        start.to_string(),
-                        end.to_string(),
-                    ))
+                    PatternComponent::StartsEndsWith(StartsEndsWith(start.to_string(), end.to_string()))
                 } else {
                     PatternComponent::Literal(component.into_owned())
                 };
                 result.push(matcher);
             }
-            PathComponent::Parent => return Err(PatternError::NoParents),
+            PathComponent::Parent => return Err(Error::NoParents),
             PathComponent::Current => {}
             PathComponent::DirectoryMarker => {
                 if result.is_empty() {
@@ -208,8 +210,8 @@ fn path_to_pattern<'a, I: IntoIterator<Item = PathComponent<'a>>>(
 #[derive(Clone, Debug)]
 struct PathMatchNode {
     can_end: bool,
-    literals: HashMap<PathComponent<'static>, PathMatchNode>,
-    starts_ends_with: HashMap<StartsEndsWith, PathMatchNode>,
+    literals: BTreeMap<PathComponent<'static>, PathMatchNode>,
+    starts_ends_with: BTreeMap<StartsEndsWith, PathMatchNode>,
     min_traversals: usize,
     max_traversals: usize,
 }
@@ -218,23 +220,20 @@ impl Default for PathMatchNode {
     fn default() -> PathMatchNode {
         PathMatchNode {
             can_end: false,
-            literals: HashMap::new(),
-            starts_ends_with: HashMap::new(),
+            literals: BTreeMap::new(),
+            starts_ends_with: BTreeMap::new(),
             min_traversals: 0,
             max_traversals: usize::MAX,
         }
     }
 }
 
-impl std::fmt::Display for PathMatchNode {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        use std::fmt::Write as _;
+impl alloc::fmt::Display for PathMatchNode {
+    fn fmt(&self, formatter: &mut alloc::fmt::Formatter<'_>) -> Result<(), alloc::fmt::Error> {
+        use alloc::fmt::Write as _;
 
         let literals_iter = self.literals.iter().map(|(k, v)| (k.to_string(), v));
-        let matchers_iter = self
-            .starts_ends_with
-            .iter()
-            .map(|(k, v)| (k.to_string(), v));
+        let matchers_iter = self.starts_ends_with.iter().map(|(k, v)| (k.to_string(), v));
         let subnodes_iter = literals_iter.chain(matchers_iter);
         let mut output = String::new();
         let mut has_multiple_options = false;
@@ -269,9 +268,7 @@ impl PathMatchNode {
         self.max_traversals = usize::MAX;
         match component {
             PatternComponent::Literal(literal) => self.literals.entry(literal).or_default(),
-            PatternComponent::StartsEndsWith(pattern) => {
-                self.starts_ends_with.entry(pattern).or_default()
-            }
+            PatternComponent::StartsEndsWith(pattern) => self.starts_ends_with.entry(pattern).or_default(),
         }
     }
 
@@ -291,8 +288,8 @@ impl PathMatchNode {
             .chain(self.starts_ends_with.values_mut().map(|v| (1, v)));
         for (component_depth, node) in node_iter {
             let (node_min, node_max) = node.recompute_depth_bounds();
-            *min = std::cmp::min(*min, node_min + component_depth);
-            *max = std::cmp::max(*max, node_max + component_depth);
+            *min = core::cmp::min(*min, node_min + component_depth);
+            *max = core::cmp::max(*max, node_max + component_depth);
         }
         (*min, *max)
     }
@@ -318,8 +315,7 @@ impl PathMatchNode {
                 path
             };
             let can_match = node.can_end || match_prefix;
-            let path_is_dir_marker =
-                path.len() == 1 && path.last() == Some(&PathComponent::DirectoryMarker);
+            let path_is_dir_marker = path.len() == 1 && path.last() == Some(&PathComponent::DirectoryMarker);
             if path_is_dir_marker && can_match {
                 return true;
             }
@@ -342,20 +338,40 @@ impl PathMatchNode {
     }
 }
 
+/// Matches against a path
 #[derive(Clone, Debug)]
 pub struct PathMatch {
     separator: String,
     match_tree: PathMatchNode,
 }
 
-impl std::fmt::Display for PathMatch {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+impl alloc::fmt::Display for PathMatch {
+    fn fmt(&self, formatter: &mut alloc::fmt::Formatter<'_>) -> Result<(), alloc::fmt::Error> {
         self.match_tree.fmt(formatter)
     }
 }
 
 impl PathMatch {
-    pub fn from_pattern(pattern: &str, separator: &str) -> Result<PathMatch, PatternError> {
+    /// Constructs a `PathMatch` for a single pattern.
+    ///
+    /// The pattern must use the forward slash as a separator. The following
+    /// restrictions apply:
+    /// * Each component must either be a literal name or can contain a single
+    ///   asterisk (representing a wildcard) with an optional literal prefix and
+    ///   suffix.
+    /// * `?` is not supported.
+    /// * The pattern must not contain parent traversals (`..`) but `.` is
+    ///   supported.
+    /// * No escaping of special characters is supported.
+    ///
+    /// Construction will return an error if parent traverals are present or
+    /// a component contains multiple wildcard characters.
+    ///
+    /// The supplied separator is used when parsing the supplied paths. The idea
+    /// is that the patterns you use are specified in an OS-independent
+    /// manner so they can be compile-time constant, but the separator is
+    /// supplied at run-time to allow adaptation to OS.
+    pub fn from_pattern(pattern: &str, separator: &str) -> Result<PathMatch, Error> {
         let components = StringComponentIter::new(pattern, UNIX_SEP);
         let pattern = path_to_pattern(components)?;
         let mut match_tree = PathMatchNode::default();
@@ -368,11 +384,19 @@ impl PathMatch {
         Ok(result)
     }
 
+    /// Returns `true` if the specified string matches the pattern, `false`
+    /// otherwise. Unlike patterns, paths may contain `..`, but if the parent
+    /// traversal cannot be normalized out, no matches can occur.
     pub fn matches<P: AsRef<str>>(&self, path: P) -> bool {
         let path = path.as_ref();
         self.matches_common(path, false)
     }
 
+    /// Returns `true` if the specified string forms a prefix path of one of the
+    /// patterns matches.
+    ///
+    /// The prefix must consist of full components. e.g. `first/second` is a
+    /// prefix of `first/second/third`, but `first/sec` is not.
     pub fn matches_prefix<P: AsRef<str>>(&self, path: P) -> bool {
         let path = path.as_ref();
         self.matches_common(path, true)
@@ -383,18 +407,24 @@ impl PathMatch {
         PathMatchNode::matches(&self.match_tree, &components, match_prefix)
     }
 
+    /// Returns the maximum number of components a matching path could have.
+    /// This assumes a normalized path - a matching path could always have
+    /// an arbitrary number of `.` components.
     #[must_use]
     pub fn max_depth(&self) -> usize {
         self.match_tree.max_traversals
     }
 }
 
+/// Builds a `PathMatch` which can match against multiple expressions.
 pub struct PathMatchBuilder {
     processed: Vec<Vec<PatternComponent>>,
     separator: String,
 }
 
 impl PathMatchBuilder {
+    /// Constructs a `PathMatchBuilder` where paths to be matched will use the
+    /// supplied separator.
     #[must_use]
     pub fn new(separator: &str) -> PathMatchBuilder {
         PathMatchBuilder {
@@ -403,14 +433,20 @@ impl PathMatchBuilder {
         }
     }
 
-    pub fn add_pattern(&mut self, pattern: &str) -> Result<(), PatternError> {
+    /// Adds the specified pattern to the matcher.
+    ///
+    /// This will return an error if the pattern contains parent traversals or a
+    /// component containing multiple wildcards. See also
+    /// `PathMatch::from_pattern`.
+    pub fn add_pattern(&mut self, pattern: &str) -> Result<(), Error> {
         let components = StringComponentIter::new(pattern, UNIX_SEP);
         let processed = path_to_pattern(components)?;
         self.processed.push(processed);
         Ok(())
     }
 
-    pub fn build(self) -> Result<PathMatch, PatternError> {
+    /// Constructs the `PathMatch` which can be used to match against paths.
+    pub fn build(self) -> Result<PathMatch, Error> {
         let mut match_tree = PathMatchNode::default();
         for pattern in self.processed {
             match_tree.insert(pattern);
@@ -429,7 +465,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn basic_syntax() -> Result<(), PatternError> {
+    fn basic_syntax() -> Result<(), Error> {
         let path = r"foo|bar|hmm|hello|";
         for separator in ["/", "\\"] {
             let path = path.replace("|", separator);
@@ -440,7 +476,7 @@ mod test {
     }
 
     #[test]
-    fn star() -> Result<(), PatternError> {
+    fn star() -> Result<(), Error> {
         let path = r"foo|bar|hmm|hello|";
         for separator in ["/", "\\"] {
             let path = &path.replace("|", separator);
@@ -462,7 +498,7 @@ mod test {
     }
 
     #[test]
-    fn root() -> Result<(), PatternError> {
+    fn root() -> Result<(), Error> {
         for pattern in ["/", "/./", "/.", "/////", "///./."] {
             let pattern = PathMatch::from_pattern(pattern, "/")?;
             assert!(pattern.matches("/"));
@@ -472,7 +508,7 @@ mod test {
     }
 
     #[test]
-    fn cwd() -> Result<(), PatternError> {
+    fn cwd() -> Result<(), Error> {
         // Dot is not necessarily a folder
         for pattern in [".", "././././.", ".////."] {
             let pattern = PathMatch::from_pattern(pattern, "/")?;
@@ -496,7 +532,7 @@ mod test {
     }
 
     #[test]
-    fn file_path() -> Result<(), PatternError> {
+    fn file_path() -> Result<(), Error> {
         for pattern in ["hello", "./hello", "././hello"] {
             let pattern = PathMatch::from_pattern(pattern, "/")?;
             assert!(pattern.matches("hello"));
@@ -505,7 +541,7 @@ mod test {
     }
 
     #[test]
-    fn prefix_matching() -> Result<(), PatternError> {
+    fn prefix_matching() -> Result<(), Error> {
         let pattern = "hello/there/friend";
         for separator in ["/", "\\"] {
             let pattern = PathMatch::from_pattern(pattern, separator)?;
@@ -527,7 +563,7 @@ mod test {
     }
 
     #[test]
-    fn max_depth() -> Result<(), PatternError> {
+    fn max_depth() -> Result<(), Error> {
         for (pattern, depth) in [
             (".", 0),
             ("./", 0),
@@ -551,7 +587,7 @@ mod test {
     }
 
     #[test]
-    fn multiple_builder_patterns() -> Result<(), PatternError> {
+    fn multiple_builder_patterns() -> Result<(), Error> {
         let mut builder = PathMatchBuilder::new("/");
         for pattern in [
             "./a",
@@ -586,13 +622,7 @@ mod test {
         }
 
         // These should not
-        for path in [
-            "b",
-            "a/b/c/d",
-            "b/folbar",
-            "b/barfoo",
-            "b/tes_attern",
-        ] {
+        for path in ["b", "a/b/c/d", "b/folbar", "b/barfoo", "b/tes_attern"] {
             assert!(!pattern.matches(path));
         }
 
@@ -611,7 +641,7 @@ mod test {
     }
 
     #[test]
-    fn no_patterns_match_nothing() -> Result<(), PatternError> {
+    fn no_patterns_match_nothing() -> Result<(), Error> {
         let builder = PathMatchBuilder::new("/");
         let pattern = builder.build()?;
         assert!(!pattern.matches("non_empty"));
@@ -621,7 +651,7 @@ mod test {
     }
 
     #[test]
-    fn multiple_wildcard() -> Result<(), PatternError> {
+    fn multiple_wildcard() -> Result<(), Error> {
         let pattern = PathMatch::from_pattern("*/*", r"\")?;
         assert!(!pattern.matches(r"."));
         assert!(!pattern.matches(r"hello"));
@@ -631,7 +661,7 @@ mod test {
     }
 
     #[test]
-    fn single_wildcard() -> Result<(), PatternError> {
+    fn single_wildcard() -> Result<(), Error> {
         let pattern = PathMatch::from_pattern("*", r"\")?;
         assert!(!pattern.matches(r"."));
         assert!(pattern.matches(r".hello"));
@@ -640,7 +670,7 @@ mod test {
     }
 
     #[test]
-    fn wildcard_matches_dot_in_middle() -> Result<(), PatternError> {
+    fn wildcard_matches_dot_in_middle() -> Result<(), Error> {
         let pattern = PathMatch::from_pattern("hello*there", r"\")?;
         assert!(pattern.matches(r"hello.there"));
         Ok(())
