@@ -4,15 +4,19 @@
 
 extern crate alloc;
 
+/// Platform-specific path properties
+pub mod platform_properties;
+
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use beef::Cow;
+use platform_properties::PlatformPropertiesOpaque;
 use snafu::Snafu;
 
 const PATH_CURRENT: &str = ".";
 const PATH_PARENT: &str = "..";
-const UNIX_SEP: &str = "/";
+const UNIX_SEP: char = '/';
 const WILDCARD_ANY: &str = "*";
 
 #[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
@@ -99,14 +103,14 @@ pub enum Error {
 }
 
 struct StringComponentIter<'a> {
-    path_string: core::iter::Enumerate<core::str::Split<'a, &'a str>>,
+    path_string: core::iter::Enumerate<core::str::Split<'a, &'a [char]>>,
     is_dir: bool,
 }
 
 impl<'a> StringComponentIter<'a> {
-    pub fn new(path: &'a str, separator: &'a str) -> StringComponentIter<'a> {
+    pub fn new(path: &'a str, separators: &'a [char]) -> StringComponentIter<'a> {
         StringComponentIter {
-            path_string: path.split(separator).enumerate(),
+            path_string: path.split(separators).enumerate(),
             is_dir: false,
         }
     }
@@ -247,7 +251,7 @@ impl alloc::fmt::Display for PathMatchNode {
                 output += "$";
             }
             if !v.is_empty() {
-                output += UNIX_SEP;
+                output.push(UNIX_SEP);
                 write!(&mut output, "{}", v)?;
             }
         }
@@ -341,7 +345,7 @@ impl PathMatchNode {
 /// Matches against a path
 #[derive(Clone, Debug)]
 pub struct PathMatch {
-    separator: String,
+    platform_properties: PlatformPropertiesOpaque,
     match_tree: PathMatchNode,
 }
 
@@ -367,18 +371,26 @@ impl PathMatch {
     /// Construction will return an error if parent traverals are present or
     /// a component contains multiple wildcard characters.
     ///
-    /// The supplied separator is used when parsing the supplied paths. The idea
-    /// is that the patterns you use are specified in an OS-independent
-    /// manner so they can be compile-time constant, but the separator is
-    /// supplied at run-time to allow adaptation to OS.
-    pub fn from_pattern(pattern: &str, separator: &str) -> Result<PathMatch, Error> {
-        let components = StringComponentIter::new(pattern, UNIX_SEP);
+    /// The supplied platform properties are used when parsing the supplied
+    /// paths. The idea is that the patterns you use are specified in an
+    /// OS-independent manner so they can be compile-time constant, but the
+    /// platform properties are supplied at run-time to allow adaptation to
+    /// OS.
+    pub fn from_pattern<P: Into<PlatformPropertiesOpaque>>(
+        pattern: &str,
+        platform_properties: P,
+    ) -> Result<PathMatch, Error> {
+        Self::from_pattern_mono(pattern, platform_properties.into())
+    }
+
+    fn from_pattern_mono(pattern: &str, platform_properties: PlatformPropertiesOpaque) -> Result<PathMatch, Error> {
+        let components = StringComponentIter::new(pattern, &[UNIX_SEP]);
         let pattern = path_to_pattern(components)?;
         let mut match_tree = PathMatchNode::default();
         match_tree.insert(pattern);
         match_tree.recompute_depth_bounds();
         let result = PathMatch {
-            separator: separator.to_string(),
+            platform_properties,
             match_tree,
         };
         Ok(result)
@@ -403,7 +415,8 @@ impl PathMatch {
     }
 
     fn matches_common(&self, path: &str, match_prefix: bool) -> bool {
-        let components = normalized(StringComponentIter::new(path, &self.separator));
+        let separators = self.platform_properties.separators();
+        let components = normalized(StringComponentIter::new(path, separators));
         PathMatchNode::matches(&self.match_tree, &components, match_prefix)
     }
 
@@ -419,17 +432,21 @@ impl PathMatch {
 /// Builds a `PathMatch` which can match against multiple expressions.
 pub struct PathMatchBuilder {
     processed: Vec<Vec<PatternComponent>>,
-    separator: String,
+    platform_properties: PlatformPropertiesOpaque,
 }
 
 impl PathMatchBuilder {
-    /// Constructs a `PathMatchBuilder` where paths to be matched will use the
-    /// supplied separator.
+    /// Constructs a `PathMatchBuilder` where paths to be matched are from a
+    /// platform with the specified properties.
     #[must_use]
-    pub fn new(separator: &str) -> PathMatchBuilder {
+    pub fn new<P: Into<PlatformPropertiesOpaque>>(platform_properties: P) -> PathMatchBuilder {
+        Self::new_mono(platform_properties.into())
+    }
+
+    fn new_mono(platform_properties: PlatformPropertiesOpaque) -> PathMatchBuilder {
         PathMatchBuilder {
             processed: Vec::new(),
-            separator: separator.into(),
+            platform_properties,
         }
     }
 
@@ -439,7 +456,7 @@ impl PathMatchBuilder {
     /// component containing multiple wildcards. See also
     /// `PathMatch::from_pattern`.
     pub fn add_pattern(&mut self, pattern: &str) -> Result<(), Error> {
-        let components = StringComponentIter::new(pattern, UNIX_SEP);
+        let components = StringComponentIter::new(pattern, &[UNIX_SEP]);
         let processed = path_to_pattern(components)?;
         self.processed.push(processed);
         Ok(())
@@ -453,7 +470,7 @@ impl PathMatchBuilder {
         }
         match_tree.recompute_depth_bounds();
         let result = PathMatch {
-            separator: self.separator,
+            platform_properties: self.platform_properties,
             match_tree,
         };
         Ok(result)
@@ -464,13 +481,23 @@ impl PathMatchBuilder {
 mod test {
     use super::*;
 
+    fn unix() -> PlatformPropertiesOpaque {
+        platform_properties::Unix::default().into()
+    }
+
+    fn windows() -> PlatformPropertiesOpaque {
+        platform_properties::Windows::default().into()
+    }
+
     #[test]
     fn basic_syntax() -> Result<(), Error> {
         let path = r"foo|bar|hmm|hello|";
-        for separator in ["/", "\\"] {
-            let path = path.replace("|", separator);
-            let pattern = PathMatch::from_pattern(".////foo/*/*/hel*o/", separator)?;
-            assert!(pattern.matches(path));
+        for platform in [unix(), windows()] {
+            for separator in platform.separators() {
+                let path = path.replace("|", &separator.to_string());
+                let pattern = PathMatch::from_pattern(".////foo/*/*/hel*o/", platform.clone())?;
+                assert!(pattern.matches(path));
+            }
         }
         Ok(())
     }
@@ -478,20 +505,22 @@ mod test {
     #[test]
     fn star() -> Result<(), Error> {
         let path = r"foo|bar|hmm|hello|";
-        for separator in ["/", "\\"] {
-            let path = &path.replace("|", separator);
+        for platform in [unix(), windows()] {
+            for separator in platform.separators() {
+                let path = &path.replace("|", &separator.to_string());
 
-            let pattern = PathMatch::from_pattern("./*", separator)?;
-            assert!(!pattern.matches(path));
+                let pattern = PathMatch::from_pattern("./*", platform.clone())?;
+                assert!(!pattern.matches(path));
 
-            let pattern = PathMatch::from_pattern("./*/*", separator)?;
-            assert!(!pattern.matches(path));
+                let pattern = PathMatch::from_pattern("./*/*", platform.clone())?;
+                assert!(!pattern.matches(path));
 
-            let pattern = PathMatch::from_pattern("./*/*/*", separator)?;
-            assert!(!pattern.matches(path));
+                let pattern = PathMatch::from_pattern("./*/*/*", platform.clone())?;
+                assert!(!pattern.matches(path));
 
-            let pattern = PathMatch::from_pattern("./*/*/*/*", separator)?;
-            assert!(pattern.matches(path));
+                let pattern = PathMatch::from_pattern("./*/*/*/*", platform.clone())?;
+                assert!(pattern.matches(path));
+            }
         }
 
         Ok(())
@@ -500,7 +529,7 @@ mod test {
     #[test]
     fn root() -> Result<(), Error> {
         for pattern in ["/", "/./", "/.", "/////", "///./."] {
-            let pattern = PathMatch::from_pattern(pattern, "/")?;
+            let pattern = PathMatch::from_pattern(pattern, unix())?;
             assert!(pattern.matches("/"));
             assert!(!pattern.matches("./"));
         }
@@ -511,7 +540,7 @@ mod test {
     fn cwd() -> Result<(), Error> {
         // Dot is not necessarily a folder
         for pattern in [".", "././././.", ".////."] {
-            let pattern = PathMatch::from_pattern(pattern, "/")?;
+            let pattern = PathMatch::from_pattern(pattern, unix())?;
             assert!(pattern.matches("."));
             assert!(pattern.matches("./"));
             assert!(!pattern.matches("/"));
@@ -521,7 +550,7 @@ mod test {
 
         // Dot is a folder
         for pattern in ["./", "./././"] {
-            let pattern = PathMatch::from_pattern(pattern, "/")?;
+            let pattern = PathMatch::from_pattern(pattern, unix())?;
             assert!(pattern.matches("./"));
             assert!(!pattern.matches("."));
             assert!(!pattern.matches("/"));
@@ -534,7 +563,7 @@ mod test {
     #[test]
     fn file_path() -> Result<(), Error> {
         for pattern in ["hello", "./hello", "././hello"] {
-            let pattern = PathMatch::from_pattern(pattern, "/")?;
+            let pattern = PathMatch::from_pattern(pattern, unix())?;
             assert!(pattern.matches("hello"));
         }
         Ok(())
@@ -543,20 +572,22 @@ mod test {
     #[test]
     fn prefix_matching() -> Result<(), Error> {
         let pattern = "hello/there/friend";
-        for separator in ["/", "\\"] {
-            let pattern = PathMatch::from_pattern(pattern, separator)?;
-            for path in [
-                ".",
-                ".|",
-                "hello",
-                "hello|",
-                "hello|there",
-                "hello|there|",
-                "hello|there|friend",
-                "hello|there|friend|",
-            ] {
-                let path = path.replace("|", separator);
-                assert!(pattern.matches_prefix(path));
+        for platform in [unix(), windows()] {
+            for separator in platform.separators() {
+                let pattern = PathMatch::from_pattern(pattern, platform.clone())?;
+                for path in [
+                    ".",
+                    ".|",
+                    "hello",
+                    "hello|",
+                    "hello|there",
+                    "hello|there|",
+                    "hello|there|friend",
+                    "hello|there|friend|",
+                ] {
+                    let path = path.replace("|", &separator.to_string());
+                    assert!(pattern.matches_prefix(path));
+                }
             }
         }
         Ok(())
@@ -574,9 +605,9 @@ mod test {
             ("./hello/", 1),
             ("./*/*", 2),
         ] {
-            let pattern_1 = PathMatch::from_pattern(pattern, "/")?;
+            let pattern_1 = PathMatch::from_pattern(pattern, unix())?;
             let pattern_2 = {
-                let mut builder = PathMatchBuilder::new("/");
+                let mut builder = PathMatchBuilder::new(unix());
                 builder.add_pattern(pattern)?;
                 builder.build()?
             };
@@ -588,7 +619,7 @@ mod test {
 
     #[test]
     fn multiple_builder_patterns() -> Result<(), Error> {
-        let mut builder = PathMatchBuilder::new("/");
+        let mut builder = PathMatchBuilder::new(unix());
         for pattern in [
             "./a",
             "./b/",
@@ -642,7 +673,7 @@ mod test {
 
     #[test]
     fn no_patterns_match_nothing() -> Result<(), Error> {
-        let builder = PathMatchBuilder::new("/");
+        let builder = PathMatchBuilder::new(unix());
         let pattern = builder.build()?;
         assert!(!pattern.matches("non_empty"));
         assert!(!pattern.matches(""));
@@ -652,7 +683,7 @@ mod test {
 
     #[test]
     fn multiple_wildcard() -> Result<(), Error> {
-        let pattern = PathMatch::from_pattern("*/*", r"\")?;
+        let pattern = PathMatch::from_pattern("*/*", windows())?;
         assert!(!pattern.matches(r"."));
         assert!(!pattern.matches(r"hello"));
         assert!(pattern.matches(r"hello\there"));
@@ -662,7 +693,7 @@ mod test {
 
     #[test]
     fn single_wildcard() -> Result<(), Error> {
-        let pattern = PathMatch::from_pattern("*", r"\")?;
+        let pattern = PathMatch::from_pattern("*", windows())?;
         assert!(!pattern.matches(r"."));
         assert!(pattern.matches(r".hello"));
         assert!(pattern.matches(r"hello"));
@@ -671,7 +702,7 @@ mod test {
 
     #[test]
     fn wildcard_matches_dot_in_middle() -> Result<(), Error> {
-        let pattern = PathMatch::from_pattern("hello*there", r"\")?;
+        let pattern = PathMatch::from_pattern("hello*there", windows())?;
         assert!(pattern.matches(r"hello.there"));
         Ok(())
     }

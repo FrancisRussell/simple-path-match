@@ -20,8 +20,6 @@ Implements the ability to match patterns against paths:
 - The separator of the paths to be matched against is specified at run-time.
 - No `..` instances may appear in the pattern - the library is only intended
   for evaluating relative paths below a root path.
-- The paths being matched must only use the separator that was specified at
-  `PathMatch` construction time.
 
 ## Why would someone want a library with so many restrictions? 
 
