@@ -103,15 +103,25 @@ pub enum Error {
 }
 
 struct StringComponentIter<'a> {
+    root: Option<&'a str>,
     path_string: core::iter::Enumerate<core::str::Split<'a, &'a [char]>>,
     is_dir: bool,
+    examined_root: bool,
 }
 
 impl<'a> StringComponentIter<'a> {
-    pub fn new(path: &'a str, separators: &'a [char]) -> StringComponentIter<'a> {
+    pub fn new(path: &'a str, platform_properties: &'a PlatformPropertiesOpaque) -> StringComponentIter<'a> {
+        let separators = platform_properties.separators();
+        let (root, path) = if let Some((root, remainder)) = platform_properties.root_name(path) {
+            (Some(root), remainder)
+        } else {
+            (None, path)
+        };
         StringComponentIter {
             path_string: path.split(separators).enumerate(),
             is_dir: false,
+            root,
+            examined_root: false,
         }
     }
 }
@@ -120,15 +130,17 @@ impl<'a> Iterator for StringComponentIter<'a> {
     type Item = PathComponent<'a>;
 
     fn next(&mut self) -> Option<PathComponent<'a>> {
-        for (idx, component) in self.path_string.by_ref() {
+        if !self.examined_root {
+            self.examined_root = true;
+            if let Some(root) = self.root {
+                self.is_dir = true;
+                return Some(PathComponent::RootName(root.into()));
+            }
+        }
+        for (_idx, component) in self.path_string.by_ref() {
             self.is_dir = false;
             match component {
-                "" => {
-                    if idx == 0 {
-                        return Some(PathComponent::RootName(component.into()));
-                    }
-                    self.is_dir = true;
-                }
+                "" => self.is_dir = true,
                 PATH_CURRENT => return Some(PathComponent::Current),
                 PATH_PARENT => return Some(PathComponent::Parent),
                 _ => return Some(PathComponent::Name(component.into())),
@@ -384,7 +396,8 @@ impl PathMatch {
     }
 
     fn from_pattern_mono(pattern: &str, platform_properties: PlatformPropertiesOpaque) -> Result<PathMatch, Error> {
-        let components = StringComponentIter::new(pattern, &[UNIX_SEP]);
+        let pattern_platform_properties = platform_properties::Unix::default().into();
+        let components = StringComponentIter::new(pattern, &pattern_platform_properties);
         let pattern = path_to_pattern(components)?;
         let mut match_tree = PathMatchNode::default();
         match_tree.insert(pattern);
@@ -415,8 +428,7 @@ impl PathMatch {
     }
 
     fn matches_common(&self, path: &str, match_prefix: bool) -> bool {
-        let separators = self.platform_properties.separators();
-        let components = normalized(StringComponentIter::new(path, separators));
+        let components = normalized(StringComponentIter::new(path, &self.platform_properties));
         PathMatchNode::matches(&self.match_tree, &components, match_prefix)
     }
 
@@ -456,7 +468,8 @@ impl PathMatchBuilder {
     /// component containing multiple wildcards. See also
     /// `PathMatch::from_pattern`.
     pub fn add_pattern(&mut self, pattern: &str) -> Result<(), Error> {
-        let components = StringComponentIter::new(pattern, &[UNIX_SEP]);
+        let pattern_platform_properties = platform_properties::Unix::default().into();
+        let components = StringComponentIter::new(pattern, &pattern_platform_properties);
         let processed = path_to_pattern(components)?;
         self.processed.push(processed);
         Ok(())
@@ -704,6 +717,42 @@ mod test {
     fn wildcard_matches_dot_in_middle() -> Result<(), Error> {
         let pattern = PathMatch::from_pattern("hello*there", windows())?;
         assert!(pattern.matches(r"hello.there"));
+        Ok(())
+    }
+
+    #[test]
+    fn absolute_path_parsing_windows() -> Result<(), Error> {
+        let platform = windows();
+        let components = normalized(StringComponentIter::new(r"F:\a\b/c", &platform));
+        assert_eq!(
+            &components,
+            &[
+                PathComponent::RootName("F:".into()),
+                PathComponent::Name("a".into()),
+                PathComponent::Name("b".into()),
+                PathComponent::Name("c".into()),
+            ]
+        );
+        let components = normalized(StringComponentIter::new(r"Z:\a\..\..\..", &platform));
+        assert_eq!(&components, &[PathComponent::RootName("Z:".into()),]);
+        Ok(())
+    }
+
+    #[test]
+    fn absolute_path_parsing_unix() -> Result<(), Error> {
+        let platform = unix();
+        let components = normalized(StringComponentIter::new("/a/b/c", &platform));
+        assert_eq!(
+            &components,
+            &[
+                PathComponent::RootName("".into()),
+                PathComponent::Name("a".into()),
+                PathComponent::Name("b".into()),
+                PathComponent::Name("c".into()),
+            ]
+        );
+        let components = normalized(StringComponentIter::new(r"/a/b/c/../../../../../.", &platform));
+        assert_eq!(&components, &[PathComponent::RootName("".into()),]);
         Ok(())
     }
 }
