@@ -13,4 +13,4 @@ keywords = ["path", "matching", "no-std"]
 
 [dependencies]
 beef = { version = "0.5.2", default-features = false }
-snafu = { version = "0.7.4", default-features = false }
+snafu = { version = "0.8.9", default-features = false }
